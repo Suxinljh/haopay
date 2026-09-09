@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>扫码收款</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#07C160',
+            alipayBlue: '#1677ff'
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * {box-sizing: border-box;}
+    body {font-family: system-ui,-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+    .amount-btn.active {
+      --tw-bg-opacity:1;
+      background-color: rgb(7 193 96 / var(--tw-bg-opacity));
+      color:white;
+    }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="app"></div>
+
+<script>
+/**
+ * PRD配置 与后端接口 /api/payment/config 返回对齐
+ * fixedAmounts：单位 分
+ * minAmount / maxAmount：单位 分
+ */
+const CONFIG = {
+  fixedAmounts: [1000,2000,5000,10000], // ¥10,20,50,100
+  minAmount: 100,    // ¥1
+  maxAmount: 500000, // ¥5000
+}
+
+/**
+ * 环境识别 PRD 13章节 UserAgent判断
+ */
+function getEnv(){
+  const ua = navigator.userAgent
+  const isWechat = ua.includes('MicroMessenger')
+  const isAlipay = ua.includes('AlipayClient')
+  if(isWechat) return 'wechat'
+  if(isAlipay) return 'alipay'
+  return 'browser'
+}
+const ENV = getEnv()
+
+/**
+ * 状态枚举 PRD 65页面状态
+ */
+const PAGE_STATE = {
+  initial:'initial',
+  amountSelected:'amount-selected',
+  creatingOrder:'creating-order',
+  invokingPayment:'invoking-payment',
+  waitingPayment:'waiting-payment',
+  paid:'paid',
+  cancelled:'cancelled',
+  failed:'failed',
+  unsupportedBrowser:'unsupported-browser'
+}
+
+let state = PAGE_STATE.initial
+let selectedFixedAmount = null // 分
+let customAmountStr = ''
+let currentOrderNo = ''
+let pollTimer = null
+
+// 格式化：分 → 元字符串
+function fenToYuan(fen){
+  return (fen / 100).toFixed(2)
+}
+// 元字符串转分，返回null非法
+function yuanToFen(str){
+  const v = parseFloat(str)
+  if(isNaN(v)) return null
+  const fen = Math.round(v * 100)
+  const check = Number((fen/100).toFixed(2))
+  if(check !== v) return null // 超过两位小数
+  return fen
+}
+
+/**
+ * 切换页面状态，触发渲染
+ */
+function setState(newState){
+  state = newState
+  render()
+}
+
+/**
+ * 清理轮询
+ */
+function clearPoll(){
+  if(pollTimer){
+    clearInterval(pollTimer)
+    pollTimer=null
+  }
+}
+
+/**
+ * 模拟创建订单 对接后端时替换为真实 POST /api/orders
+ */
+async function mockCreateOrder(amountFen,channel){
+  await sleep(800)
+  const orderNo = "PAY" + new Date().toISOString().replace(/[-T:.Z]/g,"").slice(0,20)
+  return {
+    orderNo,
+    amount:amountFen,
+    channel,
+    status:"pending"
+  }
+}
+function sleep(ms){
+  return new Promise(res=>setTimeout(res,ms))
+}
+
+/**
+ * 提交确认支付
+ */
+async function handleSubmitPay(){
+  let amountFen
+  if(selectedFixedAmount!==null){
+    amountFen = selectedFixedAmount
+  }else{
+    amountFen = yuanToFen(customAmountStr)
+  }
+  if(amountFen===null){
+    alert("请输入正确的支付金额")
+    return
+  }
+  if(amountFen < CONFIG.minAmount || amountFen>CONFIG.maxAmount){
+    alert(`金额范围 ¥${fenToYuan(CONFIG.minAmount)} ~ ¥${fenToYuan(CONFIG.maxAmount)}`)
+    return
+  }
+
+  // 高金额二次确认 PRD 88
+  if(amountFen >= 100000){ // >=1000元
+    if(!confirm(`确认支付 ¥${fenToYuan(amountFen)}？`)){
+      return
+    }
+  }
+
+  setState(PAGE_STATE.creatingOrder)
+  try{
+    // 真实项目：POST /api/orders {amount,channel}
+    const res = await mockCreateOrder(amountFen,ENV)
+    currentOrderNo = res.orderNo
+    setState(PAGE_STATE.invokingPayment)
+
+    // =========真实业务这里调用支付接口========
+    // wechat: POST /api/pay/wechat {orderNo} 拿到jsapi参数调起微信支付
+    // alipay: POST /api/pay/alipay {orderNo} 调起支付宝支付
+    // 下面模拟支付跳转完成，进入结果等待轮询
+    await sleep(1200)
+    setState(PAGE_STATE.waitingPayment)
+
+    // 模拟轮询订单状态 PRD 25
+    let pollCount = 0
+    clearPoll()
+    pollTimer = setInterval(async ()=>{
+      pollCount++
+      // 真实请求 GET /api/orders/:orderNo
+      // 模拟：第6次轮询模拟支付成功
+      if(pollCount >=6){
+        clearPoll()
+        setState(PAGE_STATE.paid)
+      }
+      // 最大15秒超时
+      if(pollCount>15){
+        clearPoll()
+      }
+    },1000)
+
+  }catch(e){
+    setState(PAGE_STATE.failed)
+  }
+}
+
+/**
+ * 选择固定金额
+ */
+function onSelectFixed(fenVal){
+  customAmountStr = '' // 清空自定义 PRD10互斥
+  selectedFixedAmount = fenVal
+  render()
+}
+/**
+ * 自定义金额输入
+ */
+function onCustomInput(e){
+  selectedFixedAmount = null // 取消固定金额 PRD10互斥
+  customAmountStr = e.target.value.trim()
+  render()
+}
+
+/**
+ * 渲染主函数 SPA状态切换
+ */
+function render(){
+  const app = document.getElementById('app')
+  clearPoll()
+
+  // 不支持浏览器页面 PRD14
+  if(state === PAGE_STATE.unsupportedBrowser || ENV === 'browser'){
+    app.innerHTML = `
+    <div class="min-h-screen flex flex-col items-center justify-center p-6">
+      <div class="w-20 h-20 mb-6 text-gray-300">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
+        </svg>
+      </div>
+      <h2 class="text-xl font-semibold text-gray-700 mb-3">请使用微信或支付宝扫码完成支付</h2>
+      <p class="text-gray-500 text-sm text-center">请打开微信或支付宝扫一扫，扫描商户二维码进行付款</p>
+    </div>
+    `
+    return
+  }
+
+  // 支付结果页面
+  if([PAGE_STATE.paid,PAGE_STATE.waitingPayment,PAGE_STATE.cancelled,PAGE_STATE.failed].includes(state)){
+    renderResultPage(app)
+    return
+  }
+
+  // ==========收款主页面 /payment PRD7==========
+  let currentShowAmount = null
+  if(selectedFixedAmount!==null){
+    currentShowAmount = selectedFixedAmount
+  }else{
+    const f = yuanToFen(customAmountStr)
+    if(f!==null) currentShowAmount = f
+  }
+  const btnDisabled = !(currentShowAmount && currentShowAmount>=CONFIG.minAmount && currentShowAmount<=CONFIG.maxAmount)
+  const isLoading = [PAGE_STATE.creatingOrder,PAGE_STATE.invokingPayment].includes(state)
+  const envName = ENV === 'wechat' ? '微信支付' : '支付宝支付'
+
+  // 渲染固定金额按钮
+  const fixedBtnsHtml = CONFIG.fixedAmounts.map(fen=>{
+    const yuan = fenToYuan(fen)
+    const activeCls = selectedFixedAmount === fen ? 'active' : 'bg-gray-100'
+    return `<button onclick="onSelectFixed(${fen})" class="amount-btn ${activeCls} px-4 py-3 rounded-lg text-base border border-gray-200">¥${yuan}</button>`
+  }).join('')
+
+  app.innerHTML = `
+  <div class="max-w-md mx-auto px-5 py-8">
+    <div class="text-center mb-8">
+      <h1 class="text-xl font-bold text-gray-800">商户收款</h1>
+      <div class="text-sm text-gray-400 mt-1">${envName}</div>
+    </div>
+
+    <div class="mb-6">
+      <div class="text-gray-600 mb-3">请选择支付金额</div>
+      <div class="grid grid-cols-2 gap-3 mb-5">
+        ${fixedBtnsHtml}
+      </div>
+
+      <div class="border border-gray-200 rounded-lg p-4">
+        <div class="text-gray-600 mb-2">其他金额</div>
+        <div class="flex items-center">
+          <span class="text-2xl text-gray-700 mr-2">¥</span>
+          <input
+            oninput="onCustomInput(event)"
+            value="${customAmountStr}"
+            type="text"
+            placeholder="输入金额"
+            class="flex-1 text-2xl outline-none border-none bg-transparent"
+          />
+        </div>
+        <div class="text-xs text-gray-400 mt-2">金额范围：¥${fenToYuan(CONFIG.minAmount)} - ¥${fenToYuan(CONFIG.maxAmount)}</div>
+      </div>
+    </div>
+
+    <button id="submitBtn" onclick="handleSubmitPay()" class="w-full py-4 rounded-lg text-white text-lg font-medium ${btnDisabled||isLoading?'bg-gray-300 cursor-not-allowed':'bg-primary'}" ${btnDisabled||isLoading?'disabled':''}>
+      ${isLoading ? '正在发起支付...' : (currentShowAmount ? `支付 ¥${fenToYuan(currentShowAmount)}` : '确认支付')}
+    </button>
+
+  </div>
+  `
+}
+
+/**
+ * 渲染支付结果页 /payment/result?order=xxx PRD22~25
+ */
+function renderResultPage(app){
+  let title,desc,iconSvg,colorClass
+  if(state === PAGE_STATE.paid){
+    title = "支付成功"
+    desc = `订单号：${currentOrderNo||''}`
+    colorClass = "text-green-600"
+    iconSvg = `<svg class="w-16 h-16 text-green-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`
+  }else if(state === PAGE_STATE.waitingPayment){
+    title = "正在确认支付结果..."
+    desc = "请稍候，服务端正在接收支付通知"
+    colorClass = "text-gray-600"
+    iconSvg = `<div class="w-16 h-16 flex items-center justify-center"><div class="w-10 h-10 border-4 border-gray-200 border-t-blue-500 rounded-full animate-spin"></div></div>`
+  }else if(state === PAGE_STATE.cancelled){
+    title = "支付未完成"
+    desc = "用户已取消支付，可以重新发起支付"
+    colorClass = "text-orange-600"
+    iconSvg = `<svg class="w-16 h-16 text-orange-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>`
+  }else{
+    title = "支付异常"
+    desc = "暂时无法发起支付，请稍后重试"
+    colorClass = "text-red-600"
+    iconSvg = `<svg class="w-16 h-16 text-red-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`
+  }
+
+  app.innerHTML = `
+  <div class="min-h-screen flex flex-col items-center justify-center p-6">
+    <div class="mb-4">${iconSvg}</div>
+    <h2 class="text-xl font-semibold ${colorClass} mb-2">${title}</h2>
+    <p class="text-gray-500 text-sm text-center mb-6">${desc}</p>
+    <button onclick="setState(PAGE_STATE.initial)" class="px-6 py-3 bg-gray-100 rounded-lg">返回收款页</button>
+  </div>
+  `
+}
+
+// 挂载全局方法供模板onclick调用
+window.onSelectFixed = onSelectFixed
+window.onCustomInput = onCustomInput
+window.handleSubmitPay = handleSubmitPay
+window.setState = setState
+window.PAGE_STATE = PAGE_STATE
+
+// 初始化渲染
+render()
+</script>
+</body>
+</html>
